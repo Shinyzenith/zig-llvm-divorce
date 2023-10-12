@@ -11,15 +11,20 @@ const log = std.log.scoped(.Zar);
 const os = std.os;
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
+
     var args = std.process.args();
     _ = args.skip();
 
     const file_name = args.next() orelse return error.FileNameNotSpecified;
 
-    var archive = try Archive.init(file_name);
+    var archive = try Archive.init(allocator, file_name);
     defer archive.deinit();
 
-    archive.parse();
+    try archive.parse();
 
-    log.debug("Archive type: {s}\n", .{@tagName(archive.archive_type)});
+    log.debug("Archive type: {s}\n", .{@tagName(archive.archive_type.?)});
 }
