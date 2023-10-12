@@ -19,7 +19,7 @@
         let pkgs = pkgsFor system;
         in {
           default = pkgs.mkShell {
-            name = "Zar-llvm-breakup :(";
+            name = "Zig-llvm-breakup";
             nativeBuildInputs = with pkgs; [
               # Compilers
               zig

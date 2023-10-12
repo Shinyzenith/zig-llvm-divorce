@@ -16,9 +16,12 @@ pub const GNUArchive = @import("GNU/Archive.zig");
 pub const GNUArchiveThin = @import("GNU/ArchiveThin.zig");
 
 allocator: mem.Allocator,
+
 file: fs.File,
+file_contents: []const u8,
+
 archive_type: ?ArchiveType = null,
-archive_header: ArchiveHeader,
+strtab: []const u8 = undefined,
 
 pub const ArchiveHeader = extern struct {
     name: [16]u8 = undefined,
@@ -28,6 +31,23 @@ pub const ArchiveHeader = extern struct {
     mode: [8]u8 = undefined,
     size: [10]u8 = undefined,
     fmag: [2]u8 = undefined,
+
+    pub fn getValue(raw_str: []const u8) []const u8 {
+        return mem.trimRight(u8, raw_str, " ");
+    }
+
+    pub fn getSize(self: ArchiveHeader) !u32 {
+        const value = getValue(&self.size);
+        return std.fmt.parseInt(u32, value, 10);
+    }
+
+    pub fn isStrtab(self: ArchiveHeader) bool {
+        return mem.eql(u8, getValue(&self.name), "//");
+    }
+
+    pub fn isSymtab(self: ArchiveHeader) bool {
+        return mem.eql(u8, getValue(&self.name), "/");
+    }
 };
 
 pub const ParseError = error{
@@ -63,11 +83,14 @@ pub const ArchiveType = enum {
 
 pub fn init(allocator: mem.Allocator, file_name: []const u8) !Self {
     const file = try fs.cwd().openFile(file_name, .{ .mode = .read_write });
+    const file_stat = try file.stat();
+    const file_contents = try file.readToEndAlloc(allocator, file_stat.size);
+    defer file.seekTo(0) catch {};
 
     const self: Self = .{
-        .file = file,
         .allocator = allocator,
-        .archive_header = .{},
+        .file = file,
+        .file_contents = file_contents,
     };
 
     return self;
@@ -109,13 +132,20 @@ pub fn parse(self: *Self) !void {
     const stream = self.file.seekableStream();
     const reader = stream.context.reader();
 
-    while (true or self.archive_type != .invalid) {
+    while (true) {
         if (try stream.getPos() % 2 != 0) {
             try stream.seekBy(1);
         }
 
         const archive_header = reader.readStruct(ArchiveHeader) catch break;
-        log.debug("{s}", .{std.fmt.fmtSliceEscapeLower(&archive_header.fmag)});
+        const archive_name = ArchiveHeader.getValue(&archive_header.name);
+        log.debug("Header info:\n\tname: {s}\n\tfmag: {s}\n\tsize: {d}\n\tisStrtab: {d}\n\tisSymtab: {d}", .{
+            archive_header.name,
+            std.fmt.fmtSliceEscapeLower(&archive_header.fmag),
+            try archive_header.getSize(),
+            @intFromBool(archive_header.isStrtab()),
+            @intFromBool(archive_header.isSymtab()),
+        });
 
         if (!mem.eql(u8, &archive_header.fmag, self.archive_type.?.getArfmag())) {
             log.debug(
@@ -124,9 +154,37 @@ pub fn parse(self: *Self) !void {
             );
             return;
         }
+
+        const archive_header_size = try archive_header.getSize();
+        defer _ = stream.seekBy(archive_header_size) catch {};
+
+        if (archive_header.isSymtab()) continue;
+        if (archive_header.isStrtab()) {
+            const current_position = try stream.getPos();
+            self.strtab = self.file_contents[current_position..][0..archive_header_size];
+            continue;
+        }
+        if (mem.eql(u8, archive_name, "__.SYMDEF") or mem.eql(u8, archive_name, "__.SYMDEF SORTED")) continue;
+
+        const object_file_name = blk: {
+            if (archive_name[0] == '/') {
+                log.debug("Object file name is greater than 15. Resolving string table offset.", .{});
+                const offset = try std.fmt.parseInt(u32, archive_name[1..], 10);
+                break :blk self.getString(offset);
+            }
+
+            break :blk archive_name;
+        };
+        log.debug("Object file name: {s}", .{object_file_name});
     }
+}
+
+fn getString(self: *Self, offset: u32) []const u8 {
+    std.debug.assert(offset < self.strtab.len);
+    return mem.sliceTo(@as([*:'\n']const u8, @ptrCast(self.strtab.ptr + offset)), '\n');
 }
 
 pub fn deinit(self: *Self) void {
     self.file.close();
+    self.allocator.free(self.file_contents);
 }
